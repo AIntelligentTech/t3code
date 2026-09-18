@@ -1,0 +1,4 @@
+# Local-only pin, not committed. t3code is a third-party clone declaring
+# engines.node ^24.13.1, which the machine global (22) does not satisfy.
+[tools]
+node = "24"
