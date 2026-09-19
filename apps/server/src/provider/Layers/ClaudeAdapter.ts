@@ -4947,7 +4947,21 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         canUseTool,
         onUserDialog,
         supportedDialogKinds: ["resume_return"],
-        env: McpProviderSession.withAgentDeviceEnvironment(claudeEnvironment, mcpSession),
+        env: {
+          ...McpProviderSession.withAgentDeviceEnvironment(claudeEnvironment, mcpSession),
+          // The bearer credential is passed to the child process through its
+          // environment, never through argv. `--mcp-config` is serialized onto
+          // the command line, and `/proc/<pid>/cmdline` is world-readable while
+          // `/proc/<pid>/environ` is owner-only, so a literal token in the
+          // header would be readable by every other process on the host. The
+          // CLI expands `${VAR}` inside an inline `--mcp-config` from the child
+          // environment (verified against Claude Code 2.1.275), which is the
+          // same seam CodexAdapter already uses for this credential via
+          // `bearer_token_env_var`.
+          ...(mcpSession
+            ? { T3_MCP_BEARER_TOKEN: mcpSession.authorizationHeader.replace(/^Bearer\s+/, "") }
+            : {}),
+        },
         additionalDirectories,
         ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
         ...(mcpSession
@@ -4957,7 +4971,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                   type: "http",
                   url: mcpSession.endpoint,
                   headers: {
-                    Authorization: mcpSession.authorizationHeader,
+                    Authorization: "Bearer ${T3_MCP_BEARER_TOKEN}",
                   },
                 },
               },
