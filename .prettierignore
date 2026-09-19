@@ -1,0 +1,5 @@
+# Self-contained, single-file evidence reports (tools/report). Their markup
+# and payload must be byte-exact for the report tool's own validator; running
+# a formatter over them reflows the <noscript> fallback and breaks that
+# invariant on every commit.
+docs/evidence/**/*.html
