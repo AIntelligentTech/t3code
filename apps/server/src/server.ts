@@ -148,6 +148,7 @@ import * as UsageService from "./usage/UsageService.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import {
   clearPersistedServerRuntimeState,
+  guardAgainstConcurrentServer,
   makePersistedServerRuntimeState,
   persistServerRuntimeState,
 } from "./serverRuntimeState.ts";
@@ -601,6 +602,12 @@ export const makeRoutesLayer = Layer.mergeAll(
 const makeServerLayer = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
+    // Refuse a second writer against the same store BEFORE anything binds a
+    // port or touches the event store. A lock asserted after the HTTP server
+    // is already listening is too late: the failure this closes is silent
+    // divergence between two command-side read models, not a port conflict,
+    // so "the port was free" must never be read as "it is safe to start".
+    yield* guardAgainstConcurrentServer(config.serverRuntimeStatePath);
     const activation = yield* Deferred.make<void>();
     const awaitActivation = Deferred.await(activation);
     const activationLayer = Layer.succeed(ServerActivation, awaitActivation);

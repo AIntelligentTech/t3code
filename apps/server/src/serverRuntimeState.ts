@@ -178,3 +178,65 @@ export const readPersistedServerRuntimeState = (path: string) =>
         ),
     }),
   );
+
+/**
+ * Two `t3` servers against the same `--base-dir` restore the same session
+ * store independently, and their command-side read models diverge silently:
+ * a thread created on one is invisible to the other's command dispatcher
+ * (see `apps/server/src/orchestration/Layers/OrchestrationEngine.ts`, which
+ * hydrates its in-process read model once at boot and only replays events
+ * dispatched through *that* process afterwards). There is no lock today —
+ * a second `serve` on a free port starts happily against the same store.
+ *
+ * This error names what a caller needs to resolve the conflict without
+ * digging: the pid to stop, and where the live server is already answering.
+ */
+export class ServerAlreadyRunningError extends Schema.TaggedError<ServerAlreadyRunningError>()(
+  "ServerAlreadyRunningError",
+  {
+    statePath: Schema.String,
+    state: PersistedServerRuntimeState,
+  },
+) {
+  override get message(): string {
+    return formatServerAlreadyRunningMessage(this);
+  }
+}
+
+export const formatServerAlreadyRunningMessage = (input: {
+  readonly statePath: string;
+  readonly state: PersistedServerRuntimeState;
+}): string =>
+  `A t3 server is already running for this --base-dir (pid ${input.state.pid}, ` +
+  `serving at ${input.state.origin}, started ${input.state.startedAt}). ` +
+  `Stop it first, or point --base-dir at a different directory: two servers ` +
+  `sharing one store diverge silently rather than failing loudly ` +
+  `(runtime state read from ${input.statePath}).`;
+
+/**
+ * Refuse to continue when a DIFFERENT live server already holds this
+ * base-dir's runtime-state file. Never called from inside a fresh process
+ * that has not yet bound a port — call it before any listener is created,
+ * so a refusal never leaves a half-started server behind.
+ *
+ * Two things this deliberately does NOT do, both load-bearing:
+ * - It does not refuse on a file whose pid is dead. `clearPersistedServerRuntimeState`
+ *   only runs on a clean shutdown, so a crashed or killed server leaves this
+ *   file behind; treating a stale file as a lock would turn every crash into
+ *   a permanent outage nobody could restart without manual cleanup.
+ * - It does not refuse on the CURRENT process's own pid. A server restarting
+ *   in place (same pid re-execing, or a supervisor rewriting the file after
+ *   this check ran) must never be blocked by its own prior state.
+ */
+export const guardAgainstConcurrentServer = (statePath: string) =>
+  Effect.gen(function* () {
+    const existing = yield* readPersistedServerRuntimeState(statePath);
+    if (Option.isNone(existing)) {
+      return;
+    }
+    const state = existing.value;
+    if (state.pid === process.pid || !isProcessAlive(state.pid)) {
+      return;
+    }
+    return yield* new ServerAlreadyRunningError({ statePath, state });
+  });

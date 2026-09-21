@@ -203,3 +203,104 @@ describe("serverRuntimeState", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });
+
+describe("guardAgainstConcurrentServer", () => {
+  it.effect("refuses when a DIFFERENT live process owns the base-dir", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-guard-concurrent-server-test-",
+      });
+      const statePath = path.join(root, "server-runtime.json");
+
+      // pid 1 (init) is guaranteed to exist and is never this test process,
+      // so this exercises the real "another live process" branch without
+      // depending on a process we spawned ourselves.
+      const state: ServerRuntimeState.PersistedServerRuntimeState = {
+        version: 1,
+        pid: 1,
+        port: 3773,
+        origin: "http://127.0.0.1:3773",
+        startedAt: "2026-09-19T08:20:23.000Z",
+      };
+      yield* ServerRuntimeState.persistServerRuntimeState({ path: statePath, state });
+
+      const error = yield* ServerRuntimeState.guardAgainstConcurrentServer(statePath).pipe(
+        Effect.flip,
+      );
+
+      assert.isTrue(Schema.is(ServerRuntimeState.ServerAlreadyRunningError)(error));
+      assert.equal(error.state.pid, 1);
+      assert.equal(error.statePath, statePath);
+      assert.include(error.message, "pid 1");
+      assert.include(error.message, "http://127.0.0.1:3773");
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("does not refuse when the recorded pid is dead (a stale file)", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-guard-concurrent-server-test-",
+      });
+      const statePath = path.join(root, "server-runtime.json");
+
+      // A pid this high is exceedingly unlikely to be alive on any real
+      // system (Linux caps pid_max well below this by default), which is
+      // the same assumption a crash-recovery path has to make in practice.
+      const deadPid = 2_147_483_000;
+      assert.isFalse(ServerRuntimeState.isProcessAlive(deadPid));
+
+      const state: ServerRuntimeState.PersistedServerRuntimeState = {
+        version: 1,
+        pid: deadPid,
+        port: 3773,
+        origin: "http://127.0.0.1:3773",
+        startedAt: "2026-09-19T08:20:23.000Z",
+      };
+      yield* ServerRuntimeState.persistServerRuntimeState({ path: statePath, state });
+
+      // Must not refuse: a dead pid recorded in the file is exactly the case
+      // a crash leaves behind, and refusing here would turn every crash into
+      // a permanent outage nobody could restart.
+      yield* ServerRuntimeState.guardAgainstConcurrentServer(statePath);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("does not refuse on its own pid (a restart in place)", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-guard-concurrent-server-test-",
+      });
+      const statePath = path.join(root, "server-runtime.json");
+
+      const state: ServerRuntimeState.PersistedServerRuntimeState = {
+        version: 1,
+        pid: process.pid,
+        port: 3773,
+        origin: "http://127.0.0.1:3773",
+        startedAt: "2026-09-19T08:20:23.000Z",
+      };
+      yield* ServerRuntimeState.persistServerRuntimeState({ path: statePath, state });
+
+      yield* ServerRuntimeState.guardAgainstConcurrentServer(statePath);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("does not refuse when no runtime state file exists", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-guard-concurrent-server-test-",
+      });
+      const statePath = path.join(root, "server-runtime.json");
+
+      yield* ServerRuntimeState.guardAgainstConcurrentServer(statePath);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+});
