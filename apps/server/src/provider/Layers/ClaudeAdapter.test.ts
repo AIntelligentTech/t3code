@@ -15,6 +15,7 @@ import type {
 import {
   ApprovalRequestId,
   ClaudeSettings,
+  EnvironmentId,
   ProviderDriverKind,
   ProviderItemId,
   ProviderRuntimeEvent,
@@ -38,6 +39,7 @@ import * as TestClock from "effect/testing/TestClock";
 
 import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import {
   SYNTHETIC_CLAUDE_CAPABLE_MODEL,
@@ -614,6 +616,59 @@ describe("ClaudeAdapterLive", () => {
       Effect.provide(harness.layer),
     );
   });
+
+  it.effect(
+    "keeps the MCP bearer token out of argv by passing it through the child environment",
+    () => {
+      const harness = makeHarness();
+      const mcpThreadId = ThreadId.make("thread-claude-mcp-bearer");
+      const rawToken = "test-only-sentinel-token-do-not-use";
+      return Effect.gen(function* () {
+        McpProviderSession.setMcpProviderSession({
+          environmentId: EnvironmentId.make("env-1"),
+          threadId: mcpThreadId,
+          providerSessionId: "session-1",
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          endpoint: "http://127.0.0.1:0/mcp",
+          authorizationHeader: `Bearer ${rawToken}`,
+          capabilities: new Set<string>(),
+        });
+
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: mcpThreadId,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("claudeAgent"),
+            SYNTHETIC_CLAUDE_CAPABLE_MODEL,
+          ),
+          runtimeMode: "full-access",
+        });
+
+        const createInput = harness.getLastCreateQueryInput();
+
+        // The credential must be reachable ONLY through the child environment.
+        assert.equal(createInput?.options.env?.T3_MCP_BEARER_TOKEN, rawToken);
+
+        // The value handed to the SDK for `--mcp-config` — which the SDK
+        // serializes onto the spawned process's argv — must be a `${VAR}`
+        // placeholder, never the literal secret. This is the regression this
+        // test exists to catch: before the fix, this field held
+        // `Bearer test-only-sentinel-token-do-not-use` verbatim.
+        const header = createInput?.options.mcpServers?.["t3-code"];
+        assert.isDefined(header);
+        if (header && "headers" in header) {
+          assert.equal(header.headers?.Authorization, "Bearer ${T3_MCP_BEARER_TOKEN}");
+          assert.notInclude(header.headers?.Authorization ?? "", rawToken);
+        }
+
+        McpProviderSession.clearMcpProviderSession(mcpThreadId);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
 
   it.effect("forwards Claude thinking toggle for models that support it", () => {
     const harness = makeHarness();
