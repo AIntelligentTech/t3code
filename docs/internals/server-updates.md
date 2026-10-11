@@ -13,6 +13,28 @@ immutable runtime. Preflight checks the launcher protocol because a target that
 needs new rollback guarantees cannot safely run under an older launcher. Upgrading
 that launcher requires a local service update.
 
+## Build, install, and start selection
+
+A source build and an installed runtime are separate artifacts. [The server build command](../../apps/server/scripts/cli.ts)
+creates the standalone executable; [the archive builder](../../scripts/build-cli-archive.ts)
+packages it with the web client and resource monitor. Neither creates an installed
+version directory. `t3 update <exact-version>` downloads the release archive and
+`SHA256SUMS`, verifies and extracts them in staging, checks `t3 --version`, writes
+`.install-complete`, then publishes
+`<T3CODE_HOME>/runtime/versions/<version>` ([pinned runtime installer](../../apps/server/src/cloud/pinnedRuntime.ts)).
+The release origin defaults to `pingdotgg/t3code`; a fork or mirror must set
+`T3CODE_RELEASE_BASE_URL` to its compatible release download base ([release URL
+resolver](../../packages/shared/src/cliRelease.ts)).
+
+For a managed service, `runtime/service-state.json.activeVersion` selects the runtime
+and the launcher starts that version's `t3 serve` ([service state](../../apps/server/src/cloud/serviceProtocol.ts),
+[launcher](../../apps/server/src/serviceLauncher.ts)).
+`userdata/server-runtime.json` records the live PID and endpoint; it does not select
+a version ([runtime status](../../apps/server/src/serverRuntimeState.ts)). Outside
+the service launcher, the executable path chosen by the caller or supervisor selects
+the version. A service restart interrupts agent turns, terminals, and remote clients
+([update command](../../apps/server/src/cli/update.ts)).
+
 ## Commit boundary
 
 The launcher durably records the pending update before acknowledging it, then
