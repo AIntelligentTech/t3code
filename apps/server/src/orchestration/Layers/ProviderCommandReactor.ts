@@ -16,6 +16,7 @@ import {
 import { assistantCitationsToPlainText } from "@t3tools/shared/assistantCitations";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import { isTemporaryWorktreeBranch, WORKTREE_BRANCH_PREFIX } from "@t3tools/shared/git";
+import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
@@ -84,6 +85,23 @@ type ProviderIntentEvent = Extract<
       | "thread.session-set";
   }
 >;
+
+export function isEffortOnlyModelSelectionChange(
+  previous: ModelSelection,
+  requested: ModelSelection,
+): boolean {
+  if (Equal.equals(previous, requested)) return false;
+
+  const withoutEffort = (selection: ModelSelection): ModelSelection =>
+    selection.options === undefined
+      ? selection
+      : {
+          ...selection,
+          options: selection.options.filter((option) => option.id !== "effort"),
+        };
+
+  return Equal.equals(withoutEffort(previous), withoutEffort(requested));
+}
 
 function toNonEmptyProviderInput(value: string | undefined): string | undefined {
   const normalized = value?.trim();
@@ -247,6 +265,8 @@ const make = Effect.gen(function* () {
     );
 
   const threadModelSelections = new Map<string, ModelSelection>();
+  // The newest request can differ from what a live provider session started with.
+  const appliedModelSelections = new Map<string, ModelSelection>();
   const compactingThreadIds = new Set<ThreadId>();
   type QueuedTurnStart = Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>;
   // Turn starts received while a thread compacts, replayed in order once its session is restored.
@@ -569,6 +589,7 @@ const make = Effect.gen(function* () {
 
     const desiredRuntimeMode = thread.runtimeMode;
     const requestedModelSelection = options?.modelSelection;
+    const effectiveModelSelection = requestedModelSelection ?? threadModelSelections.get(threadId);
     const resolveActiveSession = (threadId: ThreadId) =>
       providerService
         .listSessions()
@@ -597,7 +618,7 @@ const make = Effect.gen(function* () {
       activeSession.providerInstanceId !== undefined
         ? activeSession.providerInstanceId
         : thread.modelSelection.instanceId;
-    const desiredModelSelection = requestedModelSelection ?? thread.modelSelection;
+    const desiredModelSelection = effectiveModelSelection ?? thread.modelSelection;
     const desiredInstanceId = desiredModelSelection.instanceId;
     const currentInfo = yield* providerService.getInstanceInfo(currentInstanceId).pipe(
       Effect.mapError(
@@ -713,7 +734,14 @@ const make = Effect.gen(function* () {
           ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
           runtimeMode: desiredRuntimeMode,
         })
-        .pipe(Effect.tap(() => refreshWorkspaceSnapshot));
+        .pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              appliedModelSelections.set(threadId, desiredModelSelection);
+            }),
+          ),
+          Effect.tap(() => refreshWorkspaceSnapshot),
+        );
 
     const bindSessionToThread = (session: ProviderSession) =>
       Effect.gen(function* () {
@@ -758,11 +786,32 @@ const make = Effect.gen(function* () {
         requestedModelSelection !== undefined &&
         activeSession?.providerInstanceId !== requestedModelSelection.instanceId;
       const shouldRestartForModelChange = modelChanged && sessionModelSwitch === "unsupported";
-      const previousModelSelection = threadModelSelections.get(threadId);
+      const appliedModelSelection = appliedModelSelections.get(threadId);
+      const modelSelectionChanged =
+        effectiveModelSelection !== undefined &&
+        !Equal.equals(appliedModelSelection, effectiveModelSelection);
+      const effortOnlyModelSelectionChange =
+        appliedModelSelection !== undefined &&
+        effectiveModelSelection !== undefined &&
+        isEffortOnlyModelSelectionChange(appliedModelSelection, effectiveModelSelection);
+      const effortChangeDeferred =
+        preferredProvider === "claudeAgent" &&
+        effortOnlyModelSelectionChange &&
+        activeSession?.status === "running";
+      if (effortChangeDeferred && options?.pendingTurnStart === true) {
+        yield* Effect.logInfo("provider command reactor deferred Claude effort change", {
+          threadId,
+          previousEffort:
+            getModelSelectionStringOptionValue(appliedModelSelection, "effort") ?? null,
+          requestedEffort:
+            getModelSelectionStringOptionValue(effectiveModelSelection, "effort") ?? null,
+        });
+      }
       const shouldRestartForModelSelectionChange =
         preferredProvider === "claudeAgent" &&
-        requestedModelSelection !== undefined &&
-        !Equal.equals(previousModelSelection, requestedModelSelection);
+        modelSelectionChanged &&
+        !effortChangeDeferred &&
+        (!effortOnlyModelSelectionChange || options?.pendingTurnStart === true);
 
       if (
         !runtimeModeChanged &&
